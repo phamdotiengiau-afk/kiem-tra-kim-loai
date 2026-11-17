@@ -181,15 +181,19 @@ html{scroll-behavior:smooth}
   <section class="card result" id="result" hidden></section>
 
   <details class="card" id="verify">
-    <summary><b>Dành cho giáo viên: chấm lại và xuất Excel</b></summary>
-    <div style="display:flex;flex-direction:column;gap:10px;margin-top:10px">
-      <span class="hint">Trong Google Sheet, bôi đen cả cột "Mã kết quả", sao chép rồi dán vào ô dưới (mỗi mã một dòng). Trang chấm lại từ bài làm gốc, lập bảng điểm và xuất ra file Excel.</span>
-      <textarea id="codeIn" rows="4" placeholder="B18-…" aria-label="Mã kết quả"></textarea>
-      <div class="row">
-        <button class="btn sm ghost" type="button" id="checkBtn">Chấm lại và xem bảng điểm</button>
-        <button class="btn sm" type="button" id="xlsxBtn">Xuất Excel (.xlsx)</button>
+    <summary><b>Dành cho giáo viên: bảng điểm và xuất Excel</b></summary>
+    <div style="display:flex;flex-direction:column;gap:12px;margin-top:10px">
+      <div class="row" style="align-items:flex-end">
+        <label class="f" for="tKey" style="flex:1;min-width:180px">Mật khẩu giáo viên<input type="password" id="tKey" autocomplete="current-password" style="width:100%;border:1.5px solid var(--line);background:var(--bg);border-radius:8px;padding:10px 12px"></label>
+        <button class="btn sm" type="button" id="loadBtn">Xem bảng điểm</button>
       </div>
+      <details><summary class="hint">Hoặc dán mã kết quả học sinh gửi riêng</summary>
+        <textarea id="codeIn" rows="3" placeholder="B18-… (mỗi mã một dòng)" aria-label="Mã kết quả" style="margin-top:8px"></textarea>
+        <div class="row" style="margin-top:8px"><button class="btn sm ghost" type="button" id="checkBtn">Thêm vào bảng điểm</button></div>
+      </details>
       <div id="xlsxMsg" hidden></div>
+      <div id="statOut"></div>
+      <div class="row"><button class="btn sm" type="button" id="xlsxBtn" disabled>Xuất Excel (.xlsx)</button></div>
       <div id="checkOut"></div>
     </div>
   </details>
@@ -345,27 +349,27 @@ function grade(form,ans){
 const fmt=n=>String(Math.round(n*100)/100).replace(".",",");
 const formCode=form=>form.map(v=>v.slice(-1).toUpperCase()).join("");
 
-/* ================= GỬI BÀI QUA GOOGLE FORM =================
-   Dán "đường liên kết điền sẵn" của Google Form vào FORM_PREFILL.
-   Khi tạo link điền sẵn, giáo viên gõ vào các ô lần lượt: TEN, LOP, LAN, DIEM, MADE, MAKQ. */
-const FORM_PREFILL = "";
+/* ================= NỘP BÀI VÀO GOOGLE SHEET (qua Google Apps Script) =================
+   Dán địa chỉ "Ứng dụng web" của Apps Script (kết thúc bằng /exec) vào SCRIPT_URL.
+   Mật khẩu xem bảng điểm KHÔNG nằm ở đây; nó chỉ nằm trong Apps Script của giáo viên. */
+const SCRIPT_URL = "";
 
 const $=s=>document.querySelector(s);
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
-function formLinks(fields){
-  if(!FORM_PREFILL) return null;
-  let u; try{ u=new URL(FORM_PREFILL); }catch(_){ return null; }
-  const map={}; u.searchParams.forEach((v,k)=>{ if(k.startsWith("entry.")) map[v.trim().toUpperCase()]=k; });
-  const p=new URLSearchParams(); let n=0;
-  for(const key in fields){ if(map[key]){ p.append(map[key],fields[key]); n++; } }
-  if(!n) return null;
-  const base=u.origin+u.pathname.replace(/\/(viewform|formResponse).*$/,"");
-  return {direct:base+"/formResponse?"+p.toString()+"&submit=Submit", review:base+"/viewform?usp=pp_url&"+p.toString()};
-}
 function encodeCode(o){ return "B18-"+btoa(unescape(encodeURIComponent(JSON.stringify(o)))); }
 function decodeCode(s){ s=s.trim(); if(!s.startsWith("B18-")) throw new Error("bad"); return JSON.parse(decodeURIComponent(escape(atob(s.slice(4))))); }
 function attemptCode(a){ return encodeCode({name:rec.name,cls:rec.cls,n:a.n,form:a.form,answers:a.answers,startedAt:a.startedAt,submittedAt:a.submittedAt,durationSec:a.durationSec}); }
-function attemptLinks(a){ return formLinks({TEN:rec.name,LOP:rec.cls,LAN:String(a.n),DIEM:fmt(a.total),MADE:formCode(a.form),MAKQ:attemptCode(a)}); }
+async function sendAttempt(a){
+  if(!SCRIPT_URL) return false;
+  const body=JSON.stringify({name:rec.name,cls:rec.cls,n:a.n,total:a.total,per:a.per,made:formCode(a.form),
+    minutes:Math.round((a.durationSec||0)/6)/10,code:attemptCode(a)});
+  try{
+    const r=await fetch(SCRIPT_URL,{method:"POST",body,headers:{"Content-Type":"text/plain;charset=utf-8"}});
+    const j=await r.json();
+    if(j&&j.ok){ a.sent=true; persist(); return true; }
+  }catch(_){}
+  return false;
+}
 
 /* ================= Trạng thái (lưu trên trình duyệt) ================= */
 let rec={name:"",cls:"",attempts:[]};
@@ -392,21 +396,25 @@ function renderStart(){
   for(let i=0;i<LIMIT;i++){
     const a=rec.attempts[i];
     if(a&&a.status==="done"){
-      const L=attemptLinks(a);
       chips.push(`<span class="turn used">Lần ${i+1}: <b>${fmt(a.total)}</b> điểm <span class="form-code">· đề ${formCode(a.form)}</span>`+
-        (L?(a.sent?` · <span class="pill y">đã gửi</span>`:` · <a href="${esc(L.direct)}" target="_blank" rel="noopener" data-send="${i}">Gửi bài</a>`):"")+`</span>`);
+        (SCRIPT_URL?(a.sent?` · <span class="pill y">đã nộp</span>`:` · <button type="button" class="btn sm" data-send="${i}" style="padding:2px 10px">Nộp lại bài</button>`):"")+`</span>`);
     } else if(a) chips.push(`<span class="turn used">Lần ${i+1}: đang làm</span>`);
     else chips.push(`<span class="turn">Lần ${i+1}: chưa làm</span>`);
   }
   $("#turns").innerHTML=chips.join("");
-  $("#turns").querySelectorAll("[data-send]").forEach(a=>a.addEventListener("click",()=>{ rec.attempts[+a.dataset.send].sent=true; persist(); setTimeout(renderStart,50); }));
+  $("#turns").querySelectorAll("[data-send]").forEach(b=>b.addEventListener("click",async()=>{
+    b.disabled=true; b.textContent="Đang nộp…";
+    const ok=await sendAttempt(rec.attempts[+b.dataset.send]);
+    if(!ok) msg("bad","Chưa nộp được. Kiểm tra kết nối mạng rồi bấm lại, hoặc gửi mã kết quả cho giáo viên.");
+    else msg("ok","Đã nộp bài cho giáo viên.");
+    const m=[$("#startMsg").className,$("#startMsg").textContent]; renderStart(); msg(m[0].replace("note ",""),m[1]);
+  }));
   if(used){ $("#stName").value=rec.name; $("#stClass").value=rec.cls; $("#stName").disabled=true; $("#stClass").disabled=true; }
   const btn=$("#startBtn");
   if(used>=LIMIT){ btn.disabled=true; btn.textContent="Đã hết lượt làm bài";
-    msg("info",`Bạn đã dùng hết ${LIMIT} lượt làm bài. Nếu lượt nào chưa gửi, hãy bấm "Gửi bài" ở lượt đó.`);
+    if($("#startMsg").hidden) msg("info",`Bạn đã làm bài này rồi (mỗi học sinh ${LIMIT} lượt).`+(SCRIPT_URL&&rec.attempts.some(a=>a.status==="done"&&!a.sent)?` Bài chưa nộp được: bấm "Nộp lại bài".`:""));
   } else { btn.disabled=false; btn.textContent=used?`Bắt đầu lần ${used+1} (đề mới)`:"Bắt đầu làm bài"; }
-}
-function msg(kind,text){ const m=$("#startMsg"); m.hidden=false; m.className="note "+kind; m.textContent=text; }
+}function msg(kind,text){ const m=$("#startMsg"); m.hidden=false; m.className="note "+kind; m.textContent=text; }
 
 $("#startBtn").addEventListener("click",()=>{
   const name=$("#stName").value.trim(), cls=$("#stClass").value.trim();
@@ -505,7 +513,7 @@ function finish(){
 function renderResult(g){
   const sum=t=>g.per.filter((_,i)=>VID[cur.form[i]].type===t).reduce((a,b)=>a+b,0);
   const left=LIMIT-rec.attempts.length;
-  const L=attemptLinks(cur), code=attemptCode(cur);
+  const code=attemptCode(cur);
   const r=$("#result"); r.hidden=false;
   r.innerHTML=`<div class="eyebrow">Lần ${cur.n} · ${esc(rec.name)} · ${esc(rec.cls)} · Mã đề ${formCode(cur.form)}</div>
     <div class="score"><b>${fmt(g.total)}</b><span>/ 10 điểm</span></div>
@@ -521,14 +529,19 @@ function renderResult(g){
     </details>
     <div class="row">${left>0?`<button class="btn ghost sm" type="button" id="again">Làm lần ${rec.attempts.length+1} với đề mới (còn ${left} lượt)</button>`:`<span class="hint">Bạn đã dùng hết ${LIMIT} lượt làm bài.</span>`}</div>`;
   const box=$("#sendBox");
-  if(L){
-    box.innerHTML=`<div class="note info" style="display:flex;flex-direction:column;gap:10px">
-      <span><b>Bước cuối:</b> bấm nút dưới đây để gửi bài cho giáo viên. Bài chỉ được tính khi đã gửi.</span>
-      <div class="row"><a class="btn" id="sendBtn" href="${esc(L.direct)}" target="_blank" rel="noopener" style="text-decoration:none">Gửi bài cho giáo viên</a></div>
-      <span class="hint" id="sendHint">Một thẻ mới sẽ mở ra. Thấy dòng "Câu trả lời của bạn đã được ghi lại" là đã nộp thành công. Nếu thẻ mới báo lỗi, <a href="${esc(L.review)}" target="_blank" rel="noopener">mở biểu mẫu đã điền sẵn</a> rồi bấm Gửi.</span></div>`;
-    $("#sendBtn").addEventListener("click",()=>{ cur.sent=true; persist(); $("#sendBtn").textContent="Đã gửi · bấm lại nếu chưa thấy xác nhận"; });
+  if(SCRIPT_URL){
+    const a=cur;
+    const trySend=async()=>{
+      box.innerHTML=`<div class="note info">Đang nộp bài cho giáo viên…</div>`;
+      const ok=await sendAttempt(a);
+      if(ok){ box.innerHTML=`<div class="note ok"><b>Đã nộp bài thành công.</b> Giáo viên đã nhận được kết quả của bạn.</div>`; return; }
+      box.innerHTML=`<div class="note bad" style="display:flex;flex-direction:column;gap:8px"><span><b>Chưa nộp được bài</b> (có thể do mất mạng). Bấm "Nộp lại". Nếu vẫn không được, mở mục "Mã kết quả" bên dưới, sao chép mã và gửi cho giáo viên.</span>
+        <div class="row"><button class="btn sm" type="button" id="resend">Nộp lại</button></div></div>`;
+      $("#resend").addEventListener("click",trySend);
+    };
+    trySend();
   } else {
-    box.innerHTML=`<div class="note bad">Giáo viên chưa cài biểu mẫu nhận bài. Hãy mở mục "Mã kết quả" bên dưới, sao chép mã và gửi cho giáo viên.</div>`;
+    box.innerHTML=`<div class="note bad">Giáo viên chưa cài nơi nhận bài. Hãy mở mục "Mã kết quả" bên dưới, sao chép mã và gửi cho giáo viên.</div>`;
   }
   $("#copyCode").addEventListener("click",()=>{
     navigator.clipboard.writeText(code).then(()=>{$("#copyMsg").textContent="Đã sao chép.";}).catch(()=>{
@@ -558,47 +571,75 @@ function renderReview(g){
   });
 }
 
-/* ================= Giáo viên: chấm lại mã ================= */
-function readCodes(){
-  const lines=$("#codeIn").value.split(/\s+/).filter(Boolean); const rows=[]; let bad=0; const seen=new Set();
-  lines.forEach(l=>{ if(seen.has(l)) return; seen.add(l); try{ const c=decodeCode(l);
-    if(!Array.isArray(c.form)||c.form.length!==10||!c.form.every(v=>VID[v])) throw 0;
-    const g=grade(c.form,c.answers||{}); rows.push({c,g}); }catch(_){ bad++; } });
-  const key=r=>(String(r.c.cls)+"|"+String(r.c.name).trim().split(/\s+/).pop()+"|"+r.c.name).toLocaleLowerCase("vi");
-  rows.sort((a,b)=>key(a).localeCompare(key(b),"vi"));
-  return {rows,bad,dup:lines.length-seen.size};
-}
+/* ================= Giáo viên: bảng điểm và xuất Excel ================= */
+let pool=[]; // mã kết quả (từ Google Sheet và dán tay)
+function timeStr(iso){ const d=new Date(iso); const p=n=>String(n).padStart(2,"0");
+  return isNaN(d)?"":`${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
 function xMsg(kind,t){ const m=$("#xlsxMsg"); m.hidden=false; m.className="note "+kind; m.textContent=t; }
-$("#xlsxBtn").addEventListener("click",async()=>{
-  const {rows,bad,dup}=readCodes();
-  if(!rows.length){ xMsg("bad","Chưa có mã hợp lệ. Hãy dán cột \"Mã kết quả\" từ Google Sheet vào ô trên."); return; }
+function buildRows(){
+  const rows=[]; let bad=0; const seen=new Set();
+  pool.forEach(l=>{ l=String(l||"").trim(); if(!l||seen.has(l)) return; seen.add(l); try{ const c=decodeCode(l);
+    if(!Array.isArray(c.form)||c.form.length!==10||!c.form.every(v=>VID[v])) throw 0;
+    rows.push({c,g:grade(c.form,c.answers||{})}); }catch(_){ bad++; } });
+  const key=r=>(String(r.c.cls)+"|"+String(r.c.name).trim().split(/\s+/).pop()+"|"+r.c.name).toLocaleLowerCase("vi");
+  rows.sort((x,y)=>key(x).localeCompare(key(y),"vi"));
+  return {rows,bad};
+}
+function statsOf(rows){
+  const n=rows.length, t=rows.map(r=>r.g.total), avg=a=>n?Math.round(a.reduce((x,y)=>x+y,0)/n*100)/100:0;
+  return {n,avg:avg(t),max:n?Math.max(...t):0,min:n?Math.min(...t):0,ge5:t.filter(x=>x>=5).length,ge8:t.filter(x=>x>=8).length,
+    perQ:SLOTS.map((s,i)=>({avg:avg(rows.map(r=>r.g.per[i])),full:rows.filter(r=>r.g.per[i]===1).length}))};
+}
+function renderBoard(){
+  const {rows,bad}=buildRows(); const st=statsOf(rows);
+  $("#xlsxBtn").disabled=!rows.length;
+  if(!rows.length){ $("#statOut").innerHTML=""; $("#checkOut").innerHTML=`<p class="hint">Chưa có bài nộp nào.</p>`; return; }
+  $("#statOut").innerHTML=`<div class="breakdown" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr))">
+    <div class="bd">Số bài<b>${st.n}</b></div><div class="bd">Điểm trung bình<b>${fmt(st.avg)}</b></div>
+    <div class="bd">Cao nhất / thấp nhất<b>${fmt(st.max)} / ${fmt(st.min)}</b></div><div class="bd">Từ 5 điểm<b>${st.ge5} bài</b></div></div>`;
+  $("#checkOut").innerHTML=`<div class="tbl-wrap"><table class="res"><thead><tr><th>STT</th><th>Học sinh</th><th>Lớp</th><th>Điểm</th>${SLOTS.map(s=>`<th>C${s}</th>`).join("")}<th>Mã đề</th><th>Nộp lúc</th></tr></thead><tbody>`+
+    rows.map(({c,g},i)=>`<tr><td>${i+1}</td><td>${esc(c.name)}</td><td>${esc(c.cls)}</td><td><b>${fmt(g.total)}</b></td>${g.per.map(p=>`<td>${fmt(p)}</td>`).join("")}<td class="form-code">${formCode(c.form)}</td><td>${esc(timeStr(c.submittedAt))}</td></tr>`).join("")+
+    `<tr><td></td><td colspan="3"><b>Điểm TB từng câu</b></td>${st.perQ.map(q=>`<td><b>${fmt(q.avg)}</b></td>`).join("")}<td></td><td></td></tr></tbody></table></div>`+
+    (bad?`<p class="hint">Bỏ qua ${bad} mã không đọc được.</p>`:"");
+}
+$("#loadBtn").addEventListener("click",async()=>{
+  const key=$("#tKey").value;
+  if(!SCRIPT_URL){ xMsg("bad","Trang chưa được nối với Google Sheet (thiếu địa chỉ Apps Script)."); return; }
+  if(!key){ xMsg("bad","Hãy nhập mật khẩu giáo viên."); $("#tKey").focus(); return; }
+  $("#loadBtn").disabled=true; xMsg("info","Đang tải bảng điểm từ Google Sheet…");
+  try{
+    const r=await fetch(SCRIPT_URL+"?key="+encodeURIComponent(key)); const j=await r.json();
+    if(!j.ok){ xMsg("bad",j.error==="sai_mat_khau"?"Sai mật khẩu giáo viên.":"Google Sheet báo lỗi: "+(j.error||"")); }
+    else { pool=(j.codes||[]).concat(pool); renderBoard(); xMsg("ok",`Đã tải ${(j.codes||[]).length} bài nộp từ Google Sheet.`); }
+  }catch(e){ xMsg("bad","Không kết nối được Google Sheet. Kiểm tra mạng rồi thử lại."); }
+  $("#loadBtn").disabled=false;
+});
+$("#checkBtn").addEventListener("click",()=>{
+  const add=$("#codeIn").value.split(/\s+/).filter(Boolean);
+  if(!add.length){ xMsg("bad","Hãy dán ít nhất một mã bắt đầu bằng B18-."); return; }
+  pool=pool.concat(add); $("#codeIn").value=""; renderBoard(); xMsg("ok",`Đã thêm ${add.length} mã vào bảng điểm.`);
+});
+$("#xlsxBtn").addEventListener("click",()=>{
+  const {rows}=buildRows();
+  if(!rows.length){ xMsg("bad","Chưa có bài nào để xuất."); return; }
   if(!window.XLSX){ xMsg("bad","Chưa tải được thư viện tạo file Excel. Kiểm tra mạng rồi tải lại trang."); return; }
+  const st=statsOf(rows);
   const head=["STT","Họ và tên","Lớp","Điểm (/10)",...SLOTS.map(s=>"Câu "+s),"Mã đề","Thời gian nộp","Thời gian làm (phút)"];
   const data=rows.map(({c,g},i)=>[i+1,c.name,c.cls,g.total,...g.per,formCode(c.form),timeStr(c.submittedAt),Math.round((c.durationSec||0)/6)/10]);
   const ws=XLSX.utils.aoa_to_sheet([head,...data]);
   ws["!cols"]=[{wch:5},{wch:26},{wch:8},{wch:10},...SLOTS.map(()=>({wch:7})),{wch:13},{wch:17},{wch:12}];
-  const n=rows.length, avg=a=>Math.round(a.reduce((x,y)=>x+y,0)/n*100)/100;
-  const totals=rows.map(r=>r.g.total);
+  ws["!autofilter"]={ref:"A1:"+XLSX.utils.encode_col(head.length-1)+(data.length+1)};
   const stat=[["Thống kê bài kiểm tra Bài 18 – Tính chất chung của kim loại"],[],
-    ["Số bài",n],["Điểm trung bình",avg(totals)],["Điểm cao nhất",Math.max(...totals)],["Điểm thấp nhất",Math.min(...totals)],
-    ["Số bài từ 5 điểm trở lên",totals.filter(t=>t>=5).length],["Số bài từ 8 điểm trở lên",totals.filter(t=>t>=8).length],[],
+    ["Số bài",st.n],["Điểm trung bình",st.avg],["Điểm cao nhất",st.max],["Điểm thấp nhất",st.min],
+    ["Số bài từ 5 điểm trở lên",st.ge5],["Số bài từ 8 điểm trở lên",st.ge8],[],
     ["Câu","Dạng","Mức độ","Điểm trung bình (/1)","Số bài đúng trọn câu"],
-    ...SLOTS.map((s,i)=>{ const q=BANK[s][0]; return ["Câu "+s,{mc:"Trắc nghiệm",tf:"Đúng/sai",sa:"Trả lời ngắn"}[q.type],q.level,avg(rows.map(r=>r.g.per[i])),rows.filter(r=>r.g.per[i]===1).length]; })];
+    ...SLOTS.map((s,i)=>{ const q=BANK[s][0]; return ["Câu "+s,{mc:"Trắc nghiệm",tf:"Đúng/sai",sa:"Trả lời ngắn"}[q.type],q.level,st.perQ[i].avg,st.perQ[i].full]; })];
   const ws2=XLSX.utils.aoa_to_sheet(stat); ws2["!cols"]=[{wch:26},{wch:14},{wch:10},{wch:20},{wch:20}];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Bảng điểm"); XLSX.utils.book_append_sheet(wb,ws2,"Thống kê");
   const d=new Date(), p=x=>String(x).padStart(2,"0");
   try{ XLSX.writeFile(wb,`Diem-Bai18-KimLoai-${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}.xlsx`);
-    xMsg("ok",`Đã xuất ${n} bài ra file Excel (xem trong thư mục Tải xuống).`+(bad?` Bỏ qua ${bad} mã không đọc được.`:"")+(dup?` Bỏ ${dup} mã trùng.`:""));
+    xMsg("ok",`Đã xuất ${st.n} bài ra file Excel. File nằm trong thư mục Tải xuống (Downloads), mở bằng Excel hoặc Google Trang tính.`);
   }catch(e){ xMsg("bad","Không tạo được file Excel: "+(e&&e.message||"lỗi")); }
-});
-function timeStr(iso){ const d=new Date(iso); const p=n=>String(n).padStart(2,"0");
-  return isNaN(d)?"":`${p(d.getDate())}/${p(d.getMonth()+1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
-$("#checkBtn").addEventListener("click",()=>{
-  const {rows,bad}=readCodes();
-  $("#checkOut").innerHTML=!rows.length?`<div class="note bad">Không đọc được mã nào. Mã phải bắt đầu bằng B18-.</div>`:
-    `<div class="tbl-wrap"><table class="res"><thead><tr><th>Học sinh</th><th>Lớp</th><th>Lần</th><th>Điểm chấm lại</th><th>Mã đề</th><th>Điểm từng câu</th></tr></thead><tbody>`+
-    rows.map(({c,g})=>`<tr><td>${esc(c.name)}</td><td>${esc(c.cls)}</td><td>${esc(c.n)}</td><td><b>${fmt(g.total)}</b></td><td class="form-code">${formCode(c.form)}</td><td class="form-code">${g.per.map(fmt).join(" | ")}</td></tr>`).join("")+
-    `</tbody></table></div>`+(bad?`<p class="hint">Bỏ qua ${bad} mã không đọc được.</p>`:"");
 });
 
 /* ================= Khởi động ================= */
